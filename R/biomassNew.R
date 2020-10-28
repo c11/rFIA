@@ -107,7 +107,7 @@ bioStarter <- function(x,
 
   ### DEAL WITH TEXAS
   if (any(db$POP_EVAL$STATECD %in% 48)){
-    ## Will require manual updates, fix your shit texas
+    ## Will require manual updates
     txIDS <- db$POP_EVAL %>%
       filter(STATECD %in% 48) %>%
       filter(END_INVYR < 2017) %>%
@@ -231,22 +231,24 @@ bioStarter <- function(x,
 
   ### Snag the EVALIDs that are needed
   db$POP_EVAL<- db$POP_EVAL %>%
-    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD') %>%
+    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD', STATECD) %>%
     inner_join(select(db$POP_EVAL_TYP, c('EVAL_CN', 'EVAL_TYP')), by = c('CN' = 'EVAL_CN')) %>%
     filter(EVAL_TYP == 'EXPVOL' | EVAL_TYP == 'EXPCURR') %>%
     filter(!is.na(END_INVYR) & !is.na(EVALID) & END_INVYR >= 2003) %>%
     distinct(END_INVYR, EVALID, .keep_all = TRUE)
 
+
   ## If a most-recent subset, make sure that we don't get two reporting years in
   ## western states
   if (mr) {
     db$POP_EVAL <- db$POP_EVAL %>%
-      group_by(EVAL_TYP) %>%
-      filter(END_INVYR == max(END_INVYR, na.rm = TRUE))
+      group_by(EVAL_TYP, STATECD) %>%
+      filter(END_INVYR == max(END_INVYR, na.rm = TRUE)) %>%
+      ungroup()
   }
 
-
-  ## Make an annual panel ID, associated with an INVYR
+  ## Cut STATECD
+  db$POP_EVAL <- select(db$POP_EVAL, -c(STATECD))
 
   ### The population tables
   pops <- select(db$POP_EVAL, c('EVALID', 'ESTN_METHOD', 'CN', 'END_INVYR', 'EVAL_TYP')) %>%
@@ -574,6 +576,7 @@ biomass <- function(db,
                        treeDomain = NULL,
                        areaDomain = NULL,
                        totals = FALSE,
+                       variance = FALSE,
                        byPlot = FALSE,
                        nCores = 1) {
 
@@ -751,6 +754,26 @@ biomass <- function(db,
                CARB_AG_TOTAL_SE = sqrt(cagVar) / CARB_AG_TOTAL *100,
                CARB_BG_TOTAL_SE = sqrt(cbgVar) / CARB_BG_TOTAL *100,
                CARB_TOTAL_SE = sqrt(ctVar) / CARB_TOTAL *100,
+
+               ## VAR RATIO
+               NETVOL_ACRE_VAR = nvaVar,
+               SAWVOL_ACRE_VAR = svaVar,
+               BIO_AG_ACRE_VAR = baaVar,
+               BIO_BG_ACRE_VAR = bbaVar,
+               BIO_ACRE_VAR = btaVar,
+               CARB_AG_ACRE_VAR = caaVar,
+               CARB_BG_ACRE_VAR = cbaVar,
+               CARB_ACRE_VAR = ctaVar,
+               ## VAR TOTAL
+               AREA_TOTAL_VAR = aVar,
+               NETVOL_TOTAL_VAR = nvVar,
+               SAWVOL_TOTAL_VAR = svVar,
+               BIO_AG_TOTAL_VAR = bagVar,
+               BIO_BG_TOTAL_VAR = bbgVar,
+               BIO_TOTAL_VAR = btVar,
+               CARB_AG_TOTAL_VAR = cagVar,
+               CARB_BG_TOTAL_VAR = cbgVar,
+               CARB_TOTAL_VAR = ctVar,
                ## nPlots
                nPlots_TREE = plotIn_TREE,
                nPlots_AREA = plotIn_AREA)
@@ -759,24 +782,50 @@ biomass <- function(db,
 
     if (totals) {
 
-      tOut <- tOut %>%
-        select(grpBy, "NETVOL_ACRE","SAWVOL_ACRE","BIO_AG_ACRE","BIO_BG_ACRE",
-               "BIO_ACRE","CARB_AG_ACRE","CARB_BG_ACRE","CARB_ACRE","NETVOL_TOTAL",
-               "SAWVOL_TOTAL","BIO_AG_TOTAL","BIO_BG_TOTAL","BIO_TOTAL","CARB_AG_TOTAL",
-               "CARB_BG_TOTAL","CARB_TOTAL", "AREA_TOTAL","NETVOL_ACRE_SE",
-               "SAWVOL_ACRE_SE","BIO_AG_ACRE_SE", "BIO_BG_ACRE_SE", "BIO_ACRE_SE",
-               "CARB_AG_ACRE_SE","CARB_BG_ACRE_SE","CARB_ACRE_SE","NETVOL_TOTAL_SE",
-               "SAWVOL_TOTAL_SE",  "BIO_AG_TOTAL_SE",  "BIO_BG_TOTAL_SE",
-               "BIO_TOTAL_SE", "CARB_AG_TOTAL_SE", "CARB_BG_TOTAL_SE", "CARB_TOTAL_SE",
-               "AREA_TOTAL_SE","nPlots_TREE","nPlots_AREA")
+      if (variance){
+        tOut <- tOut %>%
+          select(grpBy, "NETVOL_ACRE","SAWVOL_ACRE","BIO_AG_ACRE","BIO_BG_ACRE",
+                 "BIO_ACRE","CARB_AG_ACRE","CARB_BG_ACRE","CARB_ACRE","NETVOL_TOTAL",
+                 "SAWVOL_TOTAL","BIO_AG_TOTAL","BIO_BG_TOTAL","BIO_TOTAL","CARB_AG_TOTAL",
+                 "CARB_BG_TOTAL","CARB_TOTAL", "AREA_TOTAL","NETVOL_ACRE_VAR",
+                 "SAWVOL_ACRE_VAR","BIO_AG_ACRE_VAR", "BIO_BG_ACRE_VAR", "BIO_ACRE_VAR",
+                 "CARB_AG_ACRE_VAR","CARB_BG_ACRE_VAR","CARB_ACRE_VAR","NETVOL_TOTAL_VAR",
+                 "SAWVOL_TOTAL_VAR",  "BIO_AG_TOTAL_VAR",  "BIO_BG_TOTAL_VAR",
+                 "BIO_TOTAL_VAR", "CARB_AG_TOTAL_VAR", "CARB_BG_TOTAL_VAR", "CARB_TOTAL_VAR",
+                 "AREA_TOTAL_VAR","nPlots_TREE","nPlots_AREA", 'N')
+
+      } else {
+        tOut <- tOut %>%
+          select(grpBy, "NETVOL_ACRE","SAWVOL_ACRE","BIO_AG_ACRE","BIO_BG_ACRE",
+                 "BIO_ACRE","CARB_AG_ACRE","CARB_BG_ACRE","CARB_ACRE","NETVOL_TOTAL",
+                 "SAWVOL_TOTAL","BIO_AG_TOTAL","BIO_BG_TOTAL","BIO_TOTAL","CARB_AG_TOTAL",
+                 "CARB_BG_TOTAL","CARB_TOTAL", "AREA_TOTAL","NETVOL_ACRE_SE",
+                 "SAWVOL_ACRE_SE","BIO_AG_ACRE_SE", "BIO_BG_ACRE_SE", "BIO_ACRE_SE",
+                 "CARB_AG_ACRE_SE","CARB_BG_ACRE_SE","CARB_ACRE_SE","NETVOL_TOTAL_SE",
+                 "SAWVOL_TOTAL_SE",  "BIO_AG_TOTAL_SE",  "BIO_BG_TOTAL_SE",
+                 "BIO_TOTAL_SE", "CARB_AG_TOTAL_SE", "CARB_BG_TOTAL_SE", "CARB_TOTAL_SE",
+                 "AREA_TOTAL_SE","nPlots_TREE","nPlots_AREA")
+      }
+
+
 
     } else {
-      tOut <- tOut %>%
-        select(grpBy, "NETVOL_ACRE","SAWVOL_ACRE","BIO_AG_ACRE","BIO_BG_ACRE",
-               "BIO_ACRE","CARB_AG_ACRE","CARB_BG_ACRE","CARB_ACRE","NETVOL_ACRE_SE",
-               "SAWVOL_ACRE_SE","BIO_AG_ACRE_SE", "BIO_BG_ACRE_SE", "BIO_ACRE_SE",
-               "CARB_AG_ACRE_SE","CARB_BG_ACRE_SE","CARB_ACRE_SE","nPlots_TREE",
-               "nPlots_AREA")
+      if (variance){
+        tOut <- tOut %>%
+          select(grpBy, "NETVOL_ACRE","SAWVOL_ACRE","BIO_AG_ACRE","BIO_BG_ACRE",
+                 "BIO_ACRE","CARB_AG_ACRE","CARB_BG_ACRE","CARB_ACRE","NETVOL_ACRE_VAR",
+                 "SAWVOL_ACRE_VAR","BIO_AG_ACRE_VAR", "BIO_BG_ACRE_VAR", "BIO_ACRE_VAR",
+                 "CARB_AG_ACRE_VAR","CARB_BG_ACRE_VAR","CARB_ACRE_VAR","nPlots_TREE",
+                 "nPlots_AREA", 'N')
+      } else {
+        tOut <- tOut %>%
+          select(grpBy, "NETVOL_ACRE","SAWVOL_ACRE","BIO_AG_ACRE","BIO_BG_ACRE",
+                 "BIO_ACRE","CARB_AG_ACRE","CARB_BG_ACRE","CARB_ACRE","NETVOL_ACRE_SE",
+                 "SAWVOL_ACRE_SE","BIO_AG_ACRE_SE", "BIO_BG_ACRE_SE", "BIO_ACRE_SE",
+                 "CARB_AG_ACRE_SE","CARB_BG_ACRE_SE","CARB_ACRE_SE","nPlots_TREE",
+                 "nPlots_AREA")
+      }
+
     }
 
     # Snag the names

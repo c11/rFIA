@@ -14,7 +14,7 @@ fsiStarter <- function(x,
                        areaDomain = NULL,
                        totals = FALSE,
                        byPlot = FALSE,
-                       useLM = FALSE,
+                       useSeries = FALSE,
                        nCores = 1,
                        remote,
                        mr){
@@ -132,7 +132,7 @@ fsiStarter <- function(x,
 
   ### DEAL WITH TEXAS
   if (any(db$POP_EVAL$STATECD %in% 48)){
-    ## Will require manual updates, fix your shit texas
+    ## Will require manual updates
     txIDS <- db$POP_EVAL %>%
       filter(STATECD %in% 48) %>%
       filter(END_INVYR < 2017) %>%
@@ -256,28 +256,31 @@ fsiStarter <- function(x,
   remPlts <- db$PLOT %>%
     select(PLT_CN, PREV_PLT_CN, DESIGNCD, REMPER, PLOT_STATUS_CD) %>%
     ## Has to have a remeasurement, be in the current sample, and of the national design
-    filter(!is.na(REMPER) & !is.na(PREV_PLT_CN) & PLOT_STATUS_CD != 3 & DESIGNCD == 1) %>%
+    filter(!is.na(REMPER) & !is.na(PREV_PLT_CN) & PLOT_STATUS_CD != 3 & DESIGNCD %in% c(1, 501:505)) %>%
     left_join(select(db$PLOT, PLT_CN, DESIGNCD, PLOT_STATUS_CD), by = c('PREV_PLT_CN' = 'PLT_CN'), suffix = c('', '.prev')) %>%
     ## past emasurement must be in the previous sample and of national design
-    filter(PLOT_STATUS_CD.prev != 3 & DESIGNCD.prev == 1)
+    filter(PLOT_STATUS_CD.prev != 3 & DESIGNCD.prev %in% c(1, 501:505))
 
   ### Snag the EVALIDs that are needed
   db$POP_EVAL<- db$POP_EVAL %>%
-    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD') %>%
+    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD', STATECD) %>%
     inner_join(select(db$POP_EVAL_TYP, c('EVAL_CN', 'EVAL_TYP')), by = c('CN' = 'EVAL_CN')) %>%
     filter(EVAL_TYP == 'EXPVOL') %>%
     filter(!is.na(END_INVYR) & !is.na(EVALID) & END_INVYR >= 2003) %>%
     distinct(END_INVYR, EVALID, .keep_all = TRUE)
 
+
   ## If a most-recent subset, make sure that we don't get two reporting years in
   ## western states
   if (mr) {
     db$POP_EVAL <- db$POP_EVAL %>%
-      group_by(EVAL_TYP) %>%
-      filter(END_INVYR == max(END_INVYR, na.rm = TRUE))
+      group_by(EVAL_TYP, STATECD) %>%
+      filter(END_INVYR == max(END_INVYR, na.rm = TRUE)) %>%
+      ungroup()
   }
 
-  ## Make an annual panel ID, associated with an INVYR
+  ## Cut STATECD
+  db$POP_EVAL <- select(db$POP_EVAL, -c(STATECD))
 
   ### The population tables
   pops <- select(db$POP_EVAL, c('EVALID', 'ESTN_METHOD', 'CN', 'END_INVYR', 'EVAL_TYP')) %>%
@@ -400,50 +403,31 @@ fsiStarter <- function(x,
   ## Merging state and county codes
   plts <- split(db$PLOT, as.factor(paste(db$PLOT$COUNTYCD, db$PLOT$STATECD, sep = '_')))
 
+  ## Summarize to plot-level
+  suppressWarnings({
+    ## Compute estimates in parallel -- Clusters in windows, forking otherwise
+    if (Sys.info()['sysname'] == 'Windows'){
+      cl <- makeCluster(nCores)
+      clusterEvalQ(cl, {
+        library(dplyr)
+        library(stringr)
+        library(rFIA)
+        library(tidyr)
+      })
+      out <- parLapply(cl, X = names(plts), fun = fsiHelper1, plts, db, grpBy, scaleBy, byPlot)
+      #stopCluster(cl) # Keep the cluster active for the next run
+    } else { # Unix systems
+      out <- mclapply(names(plts), FUN = fsiHelper1, plts, db, grpBy, scaleBy, byPlot, mc.cores = nCores)
+    }
+  })
 
-  ## Use the linear model procedures or strictly t2-t1 / remper?
-  if (useLM){
-    suppressWarnings({
-      ## Compute estimates in parallel -- Clusters in windows, forking otherwise
-      if (Sys.info()['sysname'] == 'Windows'){
-        cl <- makeCluster(nCores)
-        clusterEvalQ(cl, {
-          library(dplyr)
-          library(stringr)
-          library(rFIA)
-          library(tidyr)
-          library(purrr)
-        })
-        out <- parLapply(cl, X = names(plts), fun = fsiHelper1_lm, plts, db, grpBy, scaleBy, byPlot)
-        #stopCluster(cl) # Keep the cluster active for the next run
-      } else { # Unix systems
-        out <- mclapply(names(plts), FUN = fsiHelper1_lm, plts, db, grpBy, scaleBy, byPlot, mc.cores = nCores)
-      }
-    })
-  } else {
-    suppressWarnings({
-      ## Compute estimates in parallel -- Clusters in windows, forking otherwise
-      if (Sys.info()['sysname'] == 'Windows'){
-        cl <- makeCluster(nCores)
-        clusterEvalQ(cl, {
-          library(dplyr)
-          library(stringr)
-          library(rFIA)
-          library(tidyr)
-        })
-        out <- parLapply(cl, X = names(plts), fun = fsiHelper1, plts, db, grpBy, scaleBy, byPlot)
-        #stopCluster(cl) # Keep the cluster active for the next run
-      } else { # Unix systems
-        out <- mclapply(names(plts), FUN = fsiHelper1, plts, db, grpBy, scaleBy, byPlot, mc.cores = nCores)
-      }
-    })
-  }
 
   ## back to dataframes
   out <- unlist(out, recursive = FALSE)
   t <- bind_rows(out[names(out) == 't'])
   t1 <- bind_rows(out[names(out) == 't1'])
   a <- bind_rows(out[names(out) == 'a'])
+
 
   out <- list(t = t, t1 = t1, a = a, grpBy = grpBy, scaleBy = scaleBy, grpByOrig = grpByOrig, pops = pops)
 
@@ -466,9 +450,11 @@ fsi <- function(db,
                    treeDomain = NULL,
                    areaDomain = NULL,
                    totals = TRUE,
+                   variance = TRUE,
                    byPlot = FALSE,
-                   useLM = FALSE,
+                   useSeries = FALSE,
                    scaleBy = NULL,
+                   betas = NULL,
                    returnBetas = FALSE,
                    nCores = 1) {
 
@@ -530,7 +516,7 @@ fsi <- function(db,
                 bySpecies, bySizeClass,
                 landType, treeType, method,
                 lambda, treeDomain, areaDomain,
-                totals, byPlot, useLM,
+                totals, byPlot, useSeries,
                 nCores, remote, mr)
 
   ## Bring the results back
@@ -542,35 +528,19 @@ fsi <- function(db,
   scaleBy <- out[names(out) == 'scaleBy'][[1]]
   grpByOrig <- out[names(out) == 'grpByOrig'][[1]]
 
-  ## Have to update the PLT_CNs if useLM = TRUE
-  if (useLM){
-    t1 <- t1 %>%
-      ungroup() %>%
-      select(-c(PLT_CN)) %>%
-      left_join(distinct(select(t, PLT_CN, pltID)), by = 'pltID')
-    t$PREV_PLT_CN = NA
-  }
-
-  ## For easier subset below
-  if (byPlot){
-    t <- mutate(t, cut = if_else(PREV_TPA == 0 & CURR_TPA == 0, 1, 0),
-                plotIn = if_else(cut < 1 & PLOT_STATUS_CD == 1, 1, 0))
-  }
-
-
 
   ## Prep the data for modeling the size-density curve
   scaleSyms <- syms(scaleBy)
   grpSyms <- syms(grpBy)
 
   ## Get groups prepped to fit model
-  grpRates <- select(t1, PLT_CN, !!!scaleSyms, BA1, TPA1) %>%
+  grpRates <- select(t1, PLT_CN, !!!scaleSyms, BA2, TPA2) %>%
     ungroup() %>%
-    filter(TPA1 > 0) %>%
+    filter(TPA2 > 0) %>%
     tidyr::drop_na(!!!scaleSyms) %>%
     ## Stand-level variables here
-    mutate(t = log(TPA1),
-           b = log(BA1)) %>%
+    mutate(t = log(TPA2),
+           b = log(BA2)) %>%
     select(t, b, PLT_CN, !!!scaleSyms)
 
 
@@ -579,57 +549,179 @@ fsi <- function(db,
     grpRates <- mutate(grpRates, grps = as.factor(paste(!!!scaleSyms)))
     t <- mutate(t, grps = as.factor(paste(!!!scaleSyms)))
 
+    ## Remove groups with less than 10 obs
+    nGrps <- grpRates %>%
+      group_by(grps) %>%
+      summarise(n = n())
+    grpRates <- grpRates %>%
+      left_join(nGrps, by = 'grps')
+
   } else {
 
     grpRates$grps <- 1
     t$grps = 1
+
   }
 
-  ## If more than one group use a mixed model
-  if (length(unique(grpRates$grps)) > 1){
 
-    ## Run lmm at the 99 percentile of the distribution
-    mod <- lqmm(t ~ b, random = ~b, group = grps, data = grpRates,
-                control = lqmmControl(method = 'df', startQR = TRUE),
-                tau = .975, na.action = na.omit)
-
-    suppressWarnings({
-      ## Summarize results
-      beta1 <- lqmm::coef.lqmm(mod)[1] + lqmm::ranef.lqmm(mod)[1]
-      beta2 <- lqmm::coef.lqmm(mod)[2] + lqmm::ranef.lqmm(mod)[2]
-      betas <- bind_cols(beta1, beta2) %>%
-        mutate(grps = row.names(.))
-      names(betas) <- c('int', 'rate', 'grps')
-      betas$int <- exp(betas$int)
-
-    })
+  if (is.null(betas)){
+    ## Prep data for model
+    prep <- grpRates %>%
+      ungroup() %>%
+      arrange(grps) %>%
+      ## Need numeric group-level assignments
+      mutate(grp_index = as.numeric(as.factor(grps)))
 
 
+
+
+    ## If more than one group use a mixed model
+    if (length(unique(grpRates$grps)) > 1){
+
+      modFile <- system.file("extdata", "qrLMM.jag", package = "rFIA")
+      # Parameters to estimate
+      params <- c('fe_alpha', 'fe_beta', 'alpha', 'beta')
+      ## Set up in a list
+      data <- list(I = nrow(prep), ## number of obs
+                   J = length(unique(prep$grp_index)), # Number of groups
+                   y = prep$t, ## log scale TPA
+                   x = prep$b, ## log scale BA
+                   p = .99, ## Percentile for qr
+                   grp_index = prep$grp_index) # Numeric ID for groups
+
+    } else {
+
+      modFile <- system.file("extdata", "qrLM.jag", package = "rFIA")
+      # Parameters to estimate
+      params <- c('alpha', 'beta')
+      ## Set up in a list
+      data <- list(I = nrow(prep), ## number of obs
+                   y = prep$t, ## log scale TPA
+                   x = prep$b, ## log scale BA
+                   p = .99) ## Percentile for qr
+
+    }
+
+    # MCMC settings
+    ni <- 1000
+    nc <- 3
+
+    print('Modeling maximum size-density curve(s)...')
+
+    # Start Gibbs sampling
+    jags_mod_start <- R2jags::jags(data,
+                                   parameters.to.save=params,
+                                   model.file=modFile,
+                                   n.chains=nc,
+                                   n.iter=ni)
+    jags_mod <- R2jags::autojags(jags_mod_start, n.iter = 1000)
+
+
+    ## Convert to mcmc list
+    jags_mcmc <- coda::as.mcmc(jags_mod)
+
+    chains <- jags_mcmc
+    ## Convert to data.frame
+    for (i in 1:length(jags_mcmc)){
+      chains[[i]] <- as.data.frame(jags_mcmc[[i]])
+      names(chains)[i] <- i
+    }
+    class(chains) <- 'list'
+
+
+    if (length(unique(grpRates$grps)) > 1){
+      ## Make it tidy
+      betas <- bind_rows(chains) %>%
+        pivot_longer(cols = everything(), names_to = 'var', values_to = 'estimate') %>%
+        filter(str_detect(var, 'fe_beta|fe_alpha|deviance', negate = TRUE)) %>%
+        mutate(grp_index = unlist(regmatches(var, gregexpr("\\[.+?\\]", var))),
+               grp_index = as.numeric(str_sub(grp_index, 2, -2)),
+               term = case_when(str_detect(var, 'alpha') ~ 'int',
+                                TRUE ~ 'rate')) %>%
+        left_join(distinct(prep, grp_index, grps, n), by = 'grp_index') %>%
+        select(grps, term, estimate, n) %>%
+        mutate(estimate = case_when(term == 'int' ~ exp(estimate),
+                                    TRUE ~ estimate)) %>%
+        group_by(grps, term) %>%
+        summarise(mean = mean(estimate),
+                  upper = quantile(estimate, probs = .975),
+                  lower = quantile(estimate, probs = .025),
+                  n = first(n)) %>%
+        pivot_wider(id_cols = c(grps, n), names_from = term, values_from = mean:lower) %>%
+        rename(int = mean_int,
+               rate = mean_rate)
+
+      ## Fixed effect for missing groups
+      post_fe <- bind_rows(chains) %>%
+        pivot_longer(cols = everything(), names_to = 'var', values_to = 'estimate') %>%
+        filter(str_detect(var, 'fe_beta|fe_alpha')) %>%
+        mutate(term = case_when(str_detect(var, 'alpha') ~ 'fe_int',
+                                TRUE ~ 'fe_rate')) %>%
+        select(term, estimate) %>%
+        mutate(estimate = case_when(term == 'fe_int' ~ exp(estimate),
+                                    TRUE ~ estimate)) %>%
+        group_by(term) %>%
+        summarise(mean = mean(estimate),
+                  upper = quantile(estimate, probs = .975),
+                  lower = quantile(estimate, probs = .025))%>%
+        pivot_wider(names_from = term, values_from = mean:lower) %>%
+        rename(fe_int = mean_fe_int,
+               fe_rate = mean_fe_rate)
+
+      ## Adding fixed effect info
+      betas <- betas %>%
+        mutate(fe_int = post_fe$fe_int,
+               upper_fe_int = post_fe$upper_fe_int,
+               lower_fe_int = post_fe$lower_fe_int,
+               fe_rate = post_fe$fe_rate,
+               upper_fe_rate = post_fe$upper_fe_rate,
+               lower_fe_rate = post_fe$lower_fe_rate)
+
+    } else {
+      ## Make it tidy
+      betas <- bind_rows(chains) %>%
+        pivot_longer(cols = everything(), names_to = 'var', values_to = 'estimate') %>%
+        filter(str_detect(var, 'deviance', negate = TRUE)) %>%
+        mutate(term = case_when(str_detect(var, 'alpha') ~ 'int',
+                                TRUE ~ 'rate')) %>%
+        select(term, estimate) %>%
+        mutate(estimate = case_when(term == 'int' ~ exp(estimate),
+                                    TRUE ~ estimate)) %>%
+        group_by(term) %>%
+        summarise(mean = mean(estimate),
+                  upper = quantile(estimate, probs = .975),
+                  lower = quantile(estimate, probs = .025)) %>%
+        pivot_wider(names_from = term, values_from = mean:lower) %>%
+        rename(int = mean_int,
+               rate = mean_rate)
+      betas$n <- nrow(grpRates)
+      betas$grps = 1
+
+    }
+  }
+
+
+  ## If groups are missing, assume the fixed effects
+  if ('fe_int' %in% names(betas)) {
+    t <- t %>%
+      left_join(select(betas, c(grps, int, fe_int, fe_rate, rate)), by = 'grps') %>%
+      mutate(int = case_when(!is.na(int) ~ fe_int,
+                             TRUE ~ int),
+             rate = case_when(!is.na(rate) ~ fe_rate,
+                             TRUE ~ rate)) %>%
+      mutate(ba = BAA / TPA_UNADJ,
+             tmax = int * (ba^rate),
+             rd = TPA_UNADJ / tmax)
   } else {
-
-    suppressWarnings({
-      ## Run lqm
-      mod <- lqmm::lqm(t ~ b, data = grpRates, tau = .975, na.action = na.omit)
-
-      ## Summarize results
-      beta1 <- lqmm::coef.lqm(mod)[1]
-      beta2 <- lqmm::coef.lqm(mod)[2]
-      betas <- data.frame(beta1, beta2) %>%
-        mutate(grps = 1)
-      names(betas) <- c('int', 'rate', 'grps')
-      betas$int <- exp(betas$int)
-
-    })
-
+    ## Add the betas onto t
+    t <- t %>%
+      left_join(select(betas, c(grps, int, rate)), by = 'grps') %>%
+      mutate(ba = BAA / TPA_UNADJ,
+             tmax = int * (ba^rate),
+             rd = TPA_UNADJ / tmax)
   }
 
-  ## Add the betas onto t
-  t <- t %>%
-    left_join(betas, by = 'grps')
 
-  ## Add stand-level indices onto t
-  t <- t %>%
-    left_join(select(t1, PLT_CN, !!!scaleSyms, BA1, BA2, TPA1, TPA2), by = c('PLT_CN', scaleBy))
 
 
 
@@ -639,38 +731,90 @@ fsi <- function(db,
     tOut <- t
 
     tOut <- tOut %>%
-      mutate(tmax1 = int * (BA1^rate),
-             tmax2 = int * (BA2^rate),
-             ## Relative abundance of the population (relative to maximum stand density)
-             ra1 = if_else(tmax1 > 0, PREV_TPA / tmax1, 0),
-             ra2 = if_else(tmax2 > 0, CURR_TPA / tmax2, 0)) %>%
+      ## Summing within scaleBy
+      group_by(.dots = unique(c(grpBy[!c(grpBy %in% 'YEAR')], scaleBy)), YEAR, PLT_CN, PLOT_STATUS_CD, PREV_PLT_CN,
+               REMPER) %>%
+      summarize(PREV_RD = -sum(rd[ONEORTWO == 1] * tDI[ONEORTWO == 1], na.rm = TRUE),
+                CURR_RD = sum(rd[ONEORTWO == 2] * tDI[ONEORTWO == 2], na.rm = TRUE),
+                PREV_TPA = -sum(TPA_UNADJ[ONEORTWO == 1] * tDI[ONEORTWO == 1], na.rm = TRUE),
+                PREV_BAA = -sum(BAA[ONEORTWO == 1] * tDI[ONEORTWO == 1], na.rm = TRUE),
+                CURR_TPA = sum(TPA_UNADJ[ONEORTWO == 2] * tDI[ONEORTWO == 2], na.rm = TRUE),
+                CURR_BAA = sum(BAA[ONEORTWO == 2] * tDI[ONEORTWO == 2], na.rm = TRUE)) %>%
       ## Summing across scaleBy
       group_by(.dots = grpBy[!c(grpBy %in% 'YEAR')], YEAR, PLT_CN, PLOT_STATUS_CD, PREV_PLT_CN,
                REMPER) %>%
-      summarize(PREV_TPA = sum(PREV_TPA, na.rm = TRUE),
+      summarize(PREV_RD = mean(PREV_RD, na.rm = TRUE),
+                CURR_RD = mean(CURR_RD, na.rm = TRUE),
+                FSI = (CURR_RD - PREV_RD) / first(REMPER),
+                PERC_FSI = FSI / PREV_RD * 100,
+                PREV_TPA = sum(PREV_TPA, na.rm = TRUE),
                 PREV_BAA = sum(PREV_BAA, na.rm = TRUE),
-                PREV_BA = sum(PREV_BA, na.rm = TRUE),
-                CHNG_TPA = sum(CHNG_TPA, na.rm = TRUE),
-                CHNG_BAA = sum(CHNG_BAA, na.rm = TRUE),
-                CHNG_BA = sum(CHNG_BA, na.rm = TRUE),
                 CURR_TPA = sum(CURR_TPA, na.rm = TRUE),
-                CURR_BAA = sum(CURR_BAA, na.rm = TRUE),
-                CURR_BA = sum(CURR_BA, na.rm = TRUE),
-                ## Mean of relative abundance across scaleBy within plot
-                ra1 = mean(ra1, na.rm = TRUE),
-                ra2 = mean(ra2, na.rm = TRUE),
-                PREV_STAND_BA = first(BA1),
-                CURR_STAND_BA = first(BA2),
-                PREV_STAND_TPA = first(TPA1),
-                CURR_STAND_TPA = first(TPA2)) %>%
-      ## FSI is difference in relative abundance between t2 and t1
-      ## % FSI is the above expressed as a percentage (relative measure)
-      mutate(FSI = (ra2 - ra1) / REMPER,
-             PERC_FSI = FSI / ra1 * 100,
-             PREV_RD = ra1,
-             CURR_RD = ra2)
+                CURR_BAA = sum(CURR_BAA, na.rm = TRUE))
 
+    ## If we want to use multiple remeasurements to estimate change,
+    ## handle that here
+    if (useSeries) {
+      ## Get a unique ID for each remeasurement in the series
+      nMeas <- tOut %>%
+        distinct(pltID, PLT_CN, YEAR, REMPER) %>%
+        group_by(pltID) %>%
+        mutate(n = length(unique(PLT_CN)),
+               series = min_rank(YEAR)) %>%
+        ungroup() %>%
+        select(pltID, PLT_CN, REMPER, n, series)
 
+      ## Only if more than one remeasurement available
+      if (any(nMeas$n > 1)){
+
+        ## Now we loop over the unique values of n
+        ## Basically have to chunk up the data each time
+        ## in order to get intermediate estimates
+        nRems <- unique(nMeas$n)
+        remsList <- list()
+        for (i in 1:length(nRems)){
+          ## Temporal weights for each plot
+          wgts <- nMeas %>%
+            filter(series <= nRems[i] & n >= nRems[i]) %>%
+            group_by(pltID) %>%
+            ## Total remeasurement interval and weights for
+            ## individual remeasurements
+            mutate(fullRemp = sum(REMPER, na.rm = TRUE),
+                   wgt = REMPER / fullRemp) %>%
+            ungroup() %>%
+            select(PLT_CN, n, series, wgt, fullRemp)
+
+          dat <- tOut %>%
+            left_join(wgts, by = c('PLT_CN')) %>%
+            filter(series <= nRems[i] & n >= nRems[i]) %>%
+            group_by(.dots = grpBy[grpBy %in% c('YEAR', 'INVYR', 'MEASYEAR', 'PLOT_STATUS_CD') == FALSE]) %>%
+            mutate(PLOT_STATUS_CD = case_when(any(PLOT_STATUS_CD == 1) ~ as.double(1),
+                                              TRUE ~ as.double(PLOT_STATUS_CD))) %>%
+            summarize(FSI = sum(FSI*wgt, na.rm = TRUE),
+                      PLT_CN = PLT_CN[which.max(series)],
+                      CURR_RD = CURR_RD[which.max(series)],
+                      PREV_RD = PREV_RD[which.min(series)],
+                      PREV_TPA = PREV_TPA[which.min(series)],
+                      PREV_BAA = PREV_BAA[which.min(series)],
+                      CURR_TPA = CURR_TPA[which.max(series)],
+                      CURR_BAA = CURR_BAA[which.max(series)],
+                      REMPER = first(fullRemp),
+                      PLOT_STATUS_CD = first(PLOT_STATUS_CD)) %>%
+            ungroup()# %>%
+           # select(-c(pltID))
+          remsList[[i]] <- dat
+        }
+        ## Bring it all back together
+        dat <- bind_rows(remsList)
+
+        ## Update columns in tEst
+        tOut <- tOut %>%
+          ungroup() %>%
+          select(-c(PREV_RD:CURR_BAA, REMPER, PLOT_STATUS_CD)) %>%
+          left_join(dat, by = c('PLT_CN', grpBy[!c(grpBy %in% c('YEAR', 'INVYR', 'MEASYEAR', 'PLOT_STATUS_CD'))])) %>%
+          mutate(PERC_FSI = FSI / PREV_RD * 100)
+        }
+    }
 
     ## Make it spatial
     if (returnSpatial){
@@ -684,8 +828,7 @@ fsi <- function(db,
 
 
     tOut <- select(tOut, YEAR, PLT_CN, any_of('PREV_PLT_CN'), PLOT_STATUS_CD, grpBy[grpBy != 'YEAR'],
-                   FSI, PERC_FSI, REMPER, PREV_RD, CURR_RD, everything()) %>%
-      select(-c(ra1, ra2))
+                   REMPER, FSI, PERC_FSI, PREV_RD, CURR_RD, PREV_TPA, CURR_TPA, PREV_BAA, CURR_BAA)
 
 
 
@@ -709,10 +852,10 @@ fsi <- function(db,
           library(rFIA)
           library(tidyr)
         })
-        out <- parLapply(cl, X = names(popState), fun = fsiHelper2, popState, t, a, grpBy, scaleBy, method)
+        out <- parLapply(cl, X = names(popState), fun = fsiHelper2, popState, t, a, grpBy, scaleBy, method, useSeries)
         stopCluster(cl)
       } else { # Unix systems
-        out <- mclapply(names(popState), FUN = fsiHelper2, popState, t, a, grpBy, scaleBy, method, mc.cores = nCores)
+        out <- mclapply(names(popState), FUN = fsiHelper2, popState, t, a, grpBy, scaleBy, method, useSeries, mc.cores = nCores)
       }
     })
     ## back to dataframes
@@ -834,7 +977,7 @@ fsi <- function(db,
     # Tree
     tTotal <- tEst %>%
       group_by(.dots = grpBy) %>%
-      summarize_all(sum,na.rm = TRUE)
+      summarize_all(sum, na.rm = TRUE)
 
 
 
@@ -872,7 +1015,7 @@ fsi <- function(db,
                CURR_RD_VAR = ra2Var,
 
                nPlots = plotIn_t,
-               N = nh,
+               N = p2eu,
                FSI_INT = qt(.975, df=N-1) * (sqrt(siVar)/sqrt(N)),
                PERC_FSI_INT = qt(.975, df=N-1) * (sqrt(psiVar)/sqrt(N))) %>%
         mutate(FSI_STATUS = case_when(

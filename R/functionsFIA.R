@@ -1,7 +1,27 @@
 
 #### A Start up Message ------------
-.onAttach <- function(libname, pkgname){
-  #packageStartupMessage('Download FIA Data Here: https://apps.fs.usda.gov/fia/datamart/datamart.html')
+.onAttach <- function(lib, pkg) {
+  if(interactive() || getOption("verbose"))
+    packageStartupMessage(sprintf("Package %s (%s) loaded. Check out our website at https://rfia.netlify.app/.\nType citation(\"%s\") for examples of how to cite rFIA.\n", pkg,
+                                  packageDescription(pkg)$Version, pkg))
+}
+
+
+
+
+## Estimate skewness in a distribution of values
+skewness <- function(x, na.rm = TRUE){
+
+  ## Cut any NA
+  if (na.rm) x <- x[!is.na(x)]
+
+  ## Sample size
+  n <- length(x)
+
+  ## Estimate the skewness
+  skew <- (sum((x-mean(x))^3)/n)/(sum((x-mean(x))^2)/n)^(3/2)
+
+  return(skew)
 }
 
 projectPnts <- function(x, y, slope = NULL, yint = NULL){
@@ -190,11 +210,14 @@ basalArea <- function(diameter, DIA_MID = NULL){
   # }
   # ba = diameter^2 * .005454 # SQ FT, consistency with FIA EVALIDator
 
-  ba <- case_when(
-    is.na(diameter) ~ NA_real_,
-    ## Growth accounting only
-    diameter < 0 ~ -(diameter^2 * .005454),
-    TRUE ~ diameter^2 * .005454)
+  # ba <- case_when(
+  #   is.na(diameter) ~ NA_real_,
+  #   ## Growth accounting only
+  #   diameter < 0 ~ -(diameter^2 * .005454),
+  #   TRUE ~ diameter^2 * .005454)
+
+  negative <- data.table::fifelse(diameter < 0, -1, 1)
+  ba <- diameter^2 * .005454 * negative
 
 
   return(ba)
@@ -294,19 +317,19 @@ grmAdj <- function(subtyp, adjMicr, adjSubp, adjMacr) {
 #   }
 #
 # }
-stratVar <- function(ESTN_METHOD, x, xStrat, ndif, a, nh, y = NULL, yStrat = NULL){
-  ## Variance
-  if (is.null(y)){
-    v <- ifelse(first(ESTN_METHOD == 'simple'),
-                var(c(x, numeric(ndif)) * first(a) / nh),
-                (sum((c(x, numeric(ndif))^2), na.rm = TRUE) - nh * xStrat^2) / (nh * (nh-1)))
-    ## Covariance
-  } else {
-    v <- ifelse(first(ESTN_METHOD == 'simple'),
-                cov(x,y),
-                (sum(x*y, na.rm = TRUE) - sum(nh * xStrat *yStrat, na.rm = TRUE)) / (nh * (nh-1)))
-  }
-}
+# stratVar <- function(ESTN_METHOD, x, xStrat, ndif, a, nh, y = NULL, yStrat = NULL){
+#   ## Variance
+#   if (is.null(y)){
+#     v <- ifelse(first(ESTN_METHOD == 'simple'),
+#                 var(c(x, numeric(ndif)) * first(a) / nh),
+#                 (sum((c(x, numeric(ndif))^2), na.rm = TRUE) - nh * xStrat^2) / (nh * (nh-1)))
+#     ## Covariance
+#   } else {
+#     v <- ifelse(first(ESTN_METHOD == 'simple'),
+#                 cov(x,y),
+#                 (sum(x*y, na.rm = TRUE) - sum(nh * xStrat *yStrat, na.rm = TRUE)) / (nh * (nh-1)))
+#   }
+# }
 
 # Helper function to compute variance for estimation units (manages different estimation methods)
 unitVarDT <- function(method, ESTN_METHOD, a, nh, w, v, stratMean, stratMean1 = NULL){
@@ -387,6 +410,7 @@ unitMean <- function(ESTN_METHOD, a, nh, w, stratMean){
 #   )
 # }
 
+
 ## Replace current attributes with midpoint attributes depending on component
 vrAttHelper <- function(attribute, attribute.prev, attribute.mid, attribute.beg, component, remper, oneortwo){
 
@@ -403,7 +427,19 @@ vrAttHelper <- function(attribute, attribute.prev, attribute.mid, attribute.beg,
   return(at)
 }
 
-
+stratVar <- function(ESTN_METHOD, x, xStrat, ndif, a, nh, y = NULL, yStrat = NULL){
+  ## Variance
+  if (is.null(y)){
+    v <- ifelse(first(ESTN_METHOD == 'simple'),
+                var(c(x, numeric(ndif)) * first(a) / nh),
+                (sum((c(x, numeric(ndif))^2), na.rm = TRUE) - nh * xStrat^2) / (nh * (nh-1)))
+    ## Covariance
+  } else {
+    v <- ifelse(first(ESTN_METHOD == 'simple'),
+                cov(x,y),
+                (sum(x*y, na.rm = TRUE) - sum(nh * xStrat *yStrat, na.rm = TRUE)) / (nh * (nh-1)))
+  }
+}
 
 
 
@@ -540,6 +576,7 @@ str.Remote.FIA.Database <- function(object, ...) {
   cat(paste('Remote.FIA.Database', "\n"))
 }
 
+#' @import dtplyr
 #' @import dplyr
 #' @import methods
 #' @import sf
@@ -547,19 +584,25 @@ str.Remote.FIA.Database <- function(object, ...) {
 #' @import gganimate
 #' @import ggplot2
 #' @import bit64
-#' @import progress
 #' @import tidyselect
-#' @import purrr
 #' @importFrom rlang eval_tidy enquo enquos quos quo
-#' @importFrom data.table fread fwrite rbindlist
+#' @importFrom data.table fread fwrite rbindlist fifelse
 #' @importFrom parallel makeCluster detectCores mclapply parLapply stopCluster clusterEvalQ
 #' @import tidyr
 #' @importFrom sp over proj4string<- coordinates<- spTransform proj4string
-#' @importFrom stats cov var coef lm na.omit
-#' @importFrom utils object.size read.csv tail globalVariables type.convert download.file unzip
-#' @import dtplyr
-#' @importFrom lqmm lqmm lqm coef.lqmm  coef.lqm ranef.lqmm lqmmControl
+#' @importFrom stats cov var coef lm na.omit quantile
+#' @importFrom utils object.size read.csv tail globalVariables type.convert download.file unzip packageDescription
+#' @importFrom R2jags autojags jags
+#' @importFrom coda as.mcmc
 NULL
+
+
+
+
+
+
+
+
 
 #globalVariables(c('.'))
 
@@ -758,6 +801,8 @@ readFIA <- function(dir,
     # Grab all the file names in directory
     files <- list.files(dir)
 
+
+
   if (inMemory){
 
       inTables <- list()
@@ -787,6 +832,13 @@ readFIA <- function(dir,
 
     # Only csvs
     files <- files[str_sub(files,-4,-1) == '.csv']
+
+    ## Only csvs that have FIA names
+    if (any(str_sub(files, 3, 3) == '_')){
+      files <- files[str_sub(files,4,-5) %in% intData$fiaTableNames]
+    } else{
+      files <- files[str_sub(files,1,-5) %in% intData$fiaTableNames]
+    }
 
     # Only extract the tables needed to run functions in rFIA
     if (common){
@@ -819,6 +871,18 @@ readFIA <- function(dir,
       files <- files[str_to_upper(str_sub(files, 1, 2)) %in% states]
 
 
+    } else {
+      ## Checking if state files and merged state files are mixed in the directory.
+      states <- unique(str_to_upper(str_sub(files, 1, 3)))
+      trueStates <- states[str_sub(states, 3,3) == '_']
+
+      ## If length is zero, then all merged states - great
+      ## If length states is the same as true States, then all state files - great
+      ## Otherwise, they're probably mixed. Throw a warning and read only the states
+      if (length(trueStates) > 0 & length(trueStates) < length(states)) {
+        warning('Found data from merged states and individual states in same directory. Reading only individual states files.')
+        files <- files[str_sub(files, 3,3) == '_']
+      }
     }
 
 
@@ -833,15 +897,23 @@ readFIA <- function(dir,
     # }
     inTables <- list()
     for (n in 1:length(files)){
-      # Read in and append each file to a list
-      file <- fread(paste(dir, files[n], sep = ""), showProgress = FALSE, integer64 = 'double', logical01 = FALSE, nThread = nCores, ...)
+      ## If MODIFIED_DATE is not present, will warn
+      suppressWarnings({
+        # Read in and append each file to a list
+        file <- fread(paste(dir, files[n], sep = ""), showProgress = FALSE,
+                      integer64 = 'double', logical01 = FALSE, nThread = nCores,
+                      drop = c('MODIFIED_DATE'), ...)
+      })
+
       # We don't want data.table formats
       #file <- as.data.frame(file)
       fileName <- str_sub(files[n], 1, -5)
 
-      inTables[[fileName]] <- file
+      # Skip over files that are empty
+      if(nrow(file) > 0){
+        inTables[[fileName]] <- file
+      }
     }
-
 
     # Give them some names
     #names(inTables) <- files
@@ -855,7 +927,7 @@ readFIA <- function(dir,
     uniqueNames <- unique(names(inTables))
     ## Works regardless of whether or not there are duplicate names (multiple states)
     for (i in 1:length(uniqueNames)){
-      outTables[[uniqueNames[i]]] <- rbindlist(inTables[names(inTables) == uniqueNames[i]])
+      outTables[[uniqueNames[i]]] <- rbindlist(inTables[names(inTables) == uniqueNames[i]], fill = TRUE)
     }
 
     # NEW CLASS NAME FOR FIA DATABASE OBJECTS
@@ -878,6 +950,8 @@ readFIA <- function(dir,
       states <- unique(str_to_upper(str_sub(files, 1, 3)))
       states <- states[str_sub(states, 3,3) == '_']
       states <- str_sub(states, 1, 2)
+      ## Only states where abbreviations make sense
+      states <- states[states %in% intData$stateNames$STATEAB]
       ## Don't fail if states have been merged
       if (length(states) < 1) states <- 1
     }
@@ -1133,9 +1207,9 @@ writeFIA <- function(db,
     stop('Cannot write remote database.')
   }
 
-  if (byState & !c('SURVEY' %in% names(db))){
-    stop('Need survey table for state abbreviations.')
-  }
+  # if (byState & !c('SURVEY' %in% names(db))){
+  #   stop('Need survey table for state abbreviations.')
+  # }
 
   #cat(sys.call()$dir)
   if (!is.null(dir)){
@@ -1154,9 +1228,9 @@ writeFIA <- function(db,
   ## Method to chunk up the database into states before writing it out
   if (byState){
 
-    stateNames <- distinct(db$SURVEY, STATECD, STATEAB)
     db$PLOT <- db$PLOT %>%
-      left_join(stateNames, by = 'STATECD')
+      select(-c(any_of('STATEAB'))) %>%
+      left_join(intData$stateNames, by = 'STATECD')
 
     ## Unique state abbreviations
     states <- unique(db$PLOT$STATEAB)

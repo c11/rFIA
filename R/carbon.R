@@ -215,7 +215,7 @@ carbonStarter <- function(x,
 
   ### Snag the EVALIDs that are needed
   db$POP_EVAL<- db$POP_EVAL %>%
-    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD') %>%
+    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD', STATECD) %>%
     inner_join(select(db$POP_EVAL_TYP, c('EVAL_CN', 'EVAL_TYP')), by = c('CN' = 'EVAL_CN')) %>%
     filter(EVAL_TYP == 'EXPVOL' | EVAL_TYP == 'EXPCURR') %>%
     filter(!is.na(END_INVYR) & !is.na(EVALID) & END_INVYR >= 2003) %>%
@@ -223,15 +223,18 @@ carbonStarter <- function(x,
   #group_by(END_INVYR) %>%
   #summarise(id = list(EVALID)
 
+
   ## If a most-recent subset, make sure that we don't get two reporting years in
   ## western states
   if (mr) {
     db$POP_EVAL <- db$POP_EVAL %>%
-      group_by(EVAL_TYP) %>%
-      filter(END_INVYR == max(END_INVYR, na.rm = TRUE))
+      group_by(EVAL_TYP, STATECD) %>%
+      filter(END_INVYR == max(END_INVYR, na.rm = TRUE)) %>%
+      ungroup()
   }
 
-  ## Make an annual panel ID, associated with an INVYR
+  ## Cut STATECD
+  db$POP_EVAL <- select(db$POP_EVAL, -c(STATECD))
 
   ### The population tables
   pops <- select(db$POP_EVAL, c('EVALID', 'ESTN_METHOD', 'CN', 'END_INVYR', 'EVAL_TYP')) %>%
@@ -530,6 +533,7 @@ carbon <- function(db,
                     lambda = .5,
                     areaDomain = NULL,
                     totals = FALSE,
+                    variance = FALSE,
                     byPlot = FALSE,
                     nCores = 1) {
 
@@ -646,11 +650,15 @@ carbon <- function(db,
                CARB_ACRE = CARB_TOTAL / AREA_TOTAL,
                ## Ratio Var
                caVar = (1/AREA_TOTAL^2) * (cVar + (CARB_ACRE^2 * aVar) - 2 * CARB_ACRE * cvEst_c),
+               CARB_ACRE_VAR = caVar,
                ## SE RATIO
                CARB_ACRE_SE = sqrt(caVar) / CARB_ACRE *100,
                ## SE TOTAL
                AREA_TOTAL_SE = sqrt(aVar) / AREA_TOTAL *100,
                CARB_TOTAL_SE = sqrt(caVar) / CARB_TOTAL *100,
+               ## Var total
+               AREA_TOTAL_VAR = aVar,
+               CARB_TOTAL_VAR = caVar,
                ## nPlots
                nPlots_TREE = plotIn_TREE,
                nPlots_AREA = plotIn_AREA)
@@ -659,14 +667,30 @@ carbon <- function(db,
 
     if (totals) {
 
-      tOut <- tOut %>%
-        select(grpBy, "CARB_ACRE","CARB_TOTAL", "AREA_TOTAL","CARB_ACRE_SE", "CARB_TOTAL_SE",
-               "AREA_TOTAL_SE","nPlots_TREE","nPlots_AREA")
+      if (variance){
+        tOut <- tOut %>%
+          select(grpBy, "CARB_ACRE","CARB_TOTAL", "AREA_TOTAL","CARB_ACRE_VAR", "CARB_TOTAL_VAR",
+                 "AREA_TOTAL_VAR","nPlots_TREE","nPlots_AREA", 'N')
+      } else {
+        tOut <- tOut %>%
+          select(grpBy, "CARB_ACRE","CARB_TOTAL", "AREA_TOTAL","CARB_ACRE_SE", "CARB_TOTAL_SE",
+                 "AREA_TOTAL_SE","nPlots_TREE","nPlots_AREA")
+      }
+
+
 
     } else {
-      tOut <- tOut %>%
-        select(grpBy, "CARB_ACRE","CARB_ACRE_SE",
-               "nPlots_TREE","nPlots_AREA")
+
+      if (variance){
+        tOut <- tOut %>%
+          select(grpBy, "CARB_ACRE","CARB_ACRE_VAR",
+                 "nPlots_TREE","nPlots_AREA", 'N')
+      } else {
+        tOut <- tOut %>%
+          select(grpBy, "CARB_ACRE","CARB_ACRE_SE",
+                 "nPlots_TREE","nPlots_AREA")
+      }
+
     }
 
     # Snag the names
@@ -808,7 +832,7 @@ carbon_backup <- function(db,
 
   ### DEAL WITH TEXAS
   if (any(db$POP_EVAL$STATECD %in% 48)){
-    ## Will require manual updates, fix your shit texas
+    ## Will require manual updates
     txIDS <- db$POP_EVAL %>%
       filter(STATECD %in% 48) %>%
       filter(END_INVYR < 2017) %>%
@@ -922,15 +946,24 @@ carbon_backup <- function(db,
 
   ### Snag the EVALIDs that are needed
   db$POP_EVAL<- db$POP_EVAL %>%
-    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD') %>%
+    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD', STATECD) %>%
     inner_join(select(db$POP_EVAL_TYP, c('EVAL_CN', 'EVAL_TYP')), by = c('CN' = 'EVAL_CN')) %>%
     filter(EVAL_TYP == 'EXPVOL' | EVAL_TYP == 'EXPCURR') %>%
     filter(!is.na(END_INVYR) & !is.na(EVALID) & END_INVYR >= 2003) %>%
     distinct(END_INVYR, EVALID, .keep_all = TRUE)# %>%
-  #group_by(END_INVYR) %>%
-  #summarise(id = list(EVALID)
 
-  ## Make an annual panel ID, associated with an INVYR
+
+  ## If a most-recent subset, make sure that we don't get two reporting years in
+  ## western states
+  if (mr) {
+    db$POP_EVAL <- db$POP_EVAL %>%
+      group_by(EVAL_TYP, STATECD) %>%
+      filter(END_INVYR == max(END_INVYR, na.rm = TRUE)) %>%
+      ungroup()
+  }
+
+  ## Cut STATECD
+  db$POP_EVAL <- select(db$POP_EVAL, -c(STATECD))
 
   ### The population tables
   pops <- select(db$POP_EVAL, c('EVALID', 'ESTN_METHOD', 'CN', 'END_INVYR')) %>%

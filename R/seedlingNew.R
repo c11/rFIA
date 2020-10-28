@@ -106,7 +106,7 @@ seedStarter <- function(x,
 
   ### DEAL WITH TEXAS
   if (any(db$POP_EVAL$STATECD %in% 48)){
-    ## Will require manual updates, fix your shit texas
+    ## Will require manual updates
     txIDS <- db$POP_EVAL %>%
       filter(STATECD %in% 48) %>%
       filter(END_INVYR < 2017) %>%
@@ -220,7 +220,7 @@ seedStarter <- function(x,
 
   ### Snag the EVALIDs that are needed
   db$POP_EVAL<- db$POP_EVAL %>%
-    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD') %>%
+    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD', STATECD) %>%
     inner_join(select(db$POP_EVAL_TYP, c('EVAL_CN', 'EVAL_TYP')), by = c('CN' = 'EVAL_CN')) %>%
     filter(EVAL_TYP == 'EXPVOL' | EVAL_TYP == 'EXPCURR') %>%
     filter(!is.na(END_INVYR) & !is.na(EVALID) & END_INVYR >= 2003) %>%
@@ -228,15 +228,18 @@ seedStarter <- function(x,
   #group_by(END_INVYR) %>%
   #summarise(id = list(EVALID)
 
+
   ## If a most-recent subset, make sure that we don't get two reporting years in
   ## western states
   if (mr) {
     db$POP_EVAL <- db$POP_EVAL %>%
-      group_by(EVAL_TYP) %>%
-      filter(END_INVYR == max(END_INVYR, na.rm = TRUE))
+      group_by(EVAL_TYP, STATECD) %>%
+      filter(END_INVYR == max(END_INVYR, na.rm = TRUE)) %>%
+      ungroup()
   }
 
-  ## Make an annual panel ID, associated with an INVYR
+  ## Cut STATECD
+  db$POP_EVAL <- select(db$POP_EVAL, -c(STATECD))
 
   ### The population tables
   pops <- select(db$POP_EVAL, c('EVALID', 'ESTN_METHOD', 'CN', 'END_INVYR', 'EVAL_TYP')) %>%
@@ -541,6 +544,7 @@ seedling <- function(db,
                    treeDomain = NULL,
                    areaDomain = NULL,
                    totals = FALSE,
+                   variance = FALSE,
                    byPlot = FALSE,
                    nCores = 1) {
 
@@ -659,6 +663,7 @@ seedling <- function(db,
       summarize(AREA_TOTAL = sum(aEst, na.rm = TRUE),
                 aVar = sum(aVar, na.rm = TRUE),
                 AREA_TOTAL_SE = sqrt(aVar) / AREA_TOTAL * 100,
+                AREA_TOTAL_VAR = aVar,
                 nPlots_AREA = sum(plotIn_AREA, na.rm = TRUE))
     # Tree
     tTotal <- tEst %>%
@@ -667,8 +672,10 @@ seedling <- function(db,
       summarize(TREE_TOTAL = sum(tEst, na.rm = TRUE),
                 ## Variances
                 treeVar = sum(tVar, na.rm = TRUE),
+                TREE_VAR = treeVar,
                 #aVar = first(aVar),
                 cvT = sum(cvEst_t, na.rm = TRUE),
+                N = sum(N, na.rm = TRUE),
                 ## Sampling Errors
                 TREE_SE = sqrt(treeVar) / TREE_TOTAL * 100,
                 nPlots_SEEDLING = sum(plotIn_TREE, na.rm = TRUE)) #%>%
@@ -693,21 +700,37 @@ seedling <- function(db,
         left_join(tpTotal, by = unique(propGrp)) %>%
         mutate(TPA = TREE_TOTAL / AREA_TOTAL,
                tpaVar = (1/AREA_TOTAL^2) * (treeVar + (TPA^2 * aVar) - 2 * TPA * cvT),
+               TPA_VAR = tpaVar,
                TPA_SE = sqrt(tpaVar) / TPA * 100,
                TPA_PERC = TREE_TOTAL / (TREE_TOTAL_full) * 100,
                tpVar = (1/TREE_TOTAL_full^2) * (treeVar + (TPA_PERC^2 * tTVar) - 2 * TPA_PERC * cvTT),
+               TPA_PERC_VAR = tpVar,
                TPA_PERC_SE = sqrt(tpVar) / TPA_PERC * 100)
     })
 
 
     if (totals) {
-      tOut <- tTotal %>%
-        select(grpBy, TPA, TPA_PERC, TREE_TOTAL, AREA_TOTAL, TPA_SE,
-               TPA_PERC_SE, TREE_SE, AREA_TOTAL_SE, nPlots_SEEDLING, nPlots_AREA)
+      if (variance){
+        tOut <- tTotal %>%
+          select(grpBy, TPA, TPA_PERC, TREE_TOTAL, AREA_TOTAL, TPA_VAR,
+                 TPA_PERC_VAR, TREE_VAR, AREA_TOTAL_VAR, nPlots_SEEDLING, nPlots_AREA, N)
+      } else {
+        tOut <- tTotal %>%
+          select(grpBy, TPA, TPA_PERC, TREE_TOTAL, AREA_TOTAL, TPA_SE,
+                 TPA_PERC_SE, TREE_SE, AREA_TOTAL_SE, nPlots_SEEDLING, nPlots_AREA)
+      }
+
     } else {
-      tOut <- tTotal %>%
-        select(grpBy, TPA, TPA_PERC,  TPA_SE,
-               TPA_PERC_SE, nPlots_SEEDLING, nPlots_AREA)
+      if (variance){
+        tOut <- tTotal %>%
+          select(grpBy, TPA, TPA_PERC,  TPA_VAR,
+                 TPA_PERC_VAR, nPlots_SEEDLING, nPlots_AREA, N)
+      } else {
+        tOut <- tTotal %>%
+          select(grpBy, TPA, TPA_PERC,  TPA_SE,
+                 TPA_PERC_SE, nPlots_SEEDLING, nPlots_AREA)
+      }
+
     }
 
     # Snag the names

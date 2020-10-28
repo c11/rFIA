@@ -108,7 +108,7 @@ tpaStarter <- function(x,
 
   ### DEAL WITH TEXAS
   if (any(db$POP_EVAL$STATECD %in% 48)){
-    ## Will require manual updates, fix your shit texas
+    ## Will require manual updates
     txIDS <- db$POP_EVAL %>%
       filter(STATECD %in% 48) %>%
       filter(END_INVYR < 2017) %>%
@@ -224,7 +224,7 @@ tpaStarter <- function(x,
 
   ### Snag the EVALIDs that are needed
   db$POP_EVAL<- db$POP_EVAL %>%
-    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD') %>%
+    select('CN', 'END_INVYR', 'EVALID', 'ESTN_METHOD', STATECD) %>%
     inner_join(select(db$POP_EVAL_TYP, c('EVAL_CN', 'EVAL_TYP')), by = c('CN' = 'EVAL_CN')) %>%
     filter(EVAL_TYP == 'EXPVOL' | EVAL_TYP == 'EXPCURR') %>%
     filter(!is.na(END_INVYR) & !is.na(EVALID) & END_INVYR >= 2003) %>%
@@ -232,15 +232,18 @@ tpaStarter <- function(x,
   #group_by(END_INVYR) %>%
   #summarise(id = list(EVALID)
 
+
   ## If a most-recent subset, make sure that we don't get two reporting years in
   ## western states
   if (mr) {
     db$POP_EVAL <- db$POP_EVAL %>%
-      group_by(EVAL_TYP) %>%
-      filter(END_INVYR == max(END_INVYR, na.rm = TRUE))
+      group_by(EVAL_TYP, STATECD) %>%
+      filter(END_INVYR == max(END_INVYR, na.rm = TRUE)) %>%
+      ungroup()
   }
 
-  ## Make an annual panel ID, associated with an INVYR
+  ## Cut STATECD
+  db$POP_EVAL <- select(db$POP_EVAL, -c(STATECD))
 
   ### The population tables
   pops <- select(db$POP_EVAL, c('EVALID', 'ESTN_METHOD', 'CN', 'END_INVYR', 'EVAL_TYP')) %>%
@@ -349,8 +352,10 @@ tpaStarter <- function(x,
 
   ### Only joining tables necessary to produce plot level estimates, adjusted for non-response
   db$PLOT <- select(db$PLOT, c('PLT_CN', 'STATECD', 'MACRO_BREAKPOINT_DIA', 'INVYR', 'MEASYEAR', 'PLOT_STATUS_CD', grpP, 'aD_p', 'sp'))
-  db$COND <- select(db$COND, c('PLT_CN', 'CONDPROP_UNADJ', 'PROP_BASIS', 'COND_STATUS_CD', 'CONDID', grpC, 'aD_c', 'landD'))
-  db$TREE <- select(db$TREE, c('PLT_CN', 'CONDID', 'DIA', 'SPCD', 'TPA_UNADJ', 'SUBP', 'TREE', grpT, 'tD', 'typeD'))
+  db$COND <- select(db$COND, c('PLT_CN', 'CONDPROP_UNADJ', 'PROP_BASIS', 'COND_STATUS_CD', 'CONDID', grpC, 'aD_c', 'landD')) %>%
+    filter(PLT_CN %in% db$PLOT$PLT_CN)
+  db$TREE <- select(db$TREE, c('PLT_CN', 'CONDID', 'DIA', 'SPCD', 'TPA_UNADJ', 'SUBP', 'TREE', grpT, 'tD', 'typeD')) %>%
+    filter(PLT_CN %in% db$PLOT$PLT_CN)
 
 
   ## Merging state and county codes
@@ -366,10 +371,14 @@ tpaStarter <- function(x,
         library(stringr)
         library(rFIA)
       })
-      out <- parLapply(cl, X = names(plts), fun = tpaHelper1, plts, db, grpBy, aGrpBy, byPlot)
+      out <- parLapply(cl, X = names(plts), fun = tpaHelper1, plts,
+                       db[names(db) %in% c('COND', 'TREE')],
+                       grpBy, aGrpBy, byPlot)
       #stopCluster(cl) # Keep the cluster active for the next run
     } else { # Unix systems
-      out <- mclapply(names(plts), FUN = tpaHelper1, plts, db, grpBy, aGrpBy, byPlot, mc.cores = nCores)
+      out <- mclapply(names(plts), FUN = tpaHelper1, plts,
+                      db[names(db) %in% c('COND', 'TREE')],
+                      grpBy, aGrpBy, byPlot, mc.cores = nCores)
     }
   })
 
@@ -395,7 +404,6 @@ tpaStarter <- function(x,
     out <- unlist(out, recursive = FALSE)
     a <- bind_rows(out[names(out) == 'a'])
     t <- bind_rows(out[names(out) == 't'])
-
 
     ## Adding YEAR to groups
     grpBy <- c('YEAR', grpBy)
@@ -577,6 +585,7 @@ tpa <- function(db,
                 treeDomain = NULL,
                 areaDomain = NULL,
                 totals = FALSE,
+                variance = FALSE,
                 byPlot = FALSE,
                 nCores = 1) {
 
@@ -693,6 +702,7 @@ tpa <- function(db,
       summarize(AREA_TOTAL = sum(aEst, na.rm = TRUE),
                 aVar = sum(aVar, na.rm = TRUE),
                 AREA_TOTAL_SE = sqrt(aVar) / AREA_TOTAL * 100,
+                AREA_TOTAL_VAR = aVar,
                 nPlots_AREA = sum(plotIn_AREA, na.rm = TRUE))
     # # Tree
     # tTotal <- tEst %>%
@@ -723,9 +733,13 @@ tpa <- function(db,
             cvB = cvEst_b,
             ## Sampling Errors
             TREE_SE = sqrt(treeVar) / TREE_TOTAL * 100,
+            TREE_VAR = treeVar,
             BA_SE = sqrt(baVar) / BA_TOTAL * 100,
+            BA_VAR = baVar,
+            N = sum(N, na.rm = TRUE),
             nPlots_TREE = plotIn_TREE) %>%
-      select(grpBy, TREE_TOTAL, BA_TOTAL, treeVar, baVar, cvT, cvB, TREE_SE, BA_SE, nPlots_TREE)
+      select(grpBy, TREE_TOTAL, BA_TOTAL, treeVar, baVar, cvT, cvB, TREE_SE, BA_SE, TREE_VAR, BA_VAR,
+             nPlots_TREE, N)
 
     ## IF using polys, we treat each zone as a unique population
     if (!is.null(polys)){
@@ -755,25 +769,43 @@ tpa <- function(db,
                baaVar = (1/AREA_TOTAL^2) * (baVar + (BAA^2 * aVar) - (2 * BAA * cvB)),
                TPA_SE = sqrt(tpaVar) / TPA * 100,
                BAA_SE = sqrt(baaVar) / BAA * 100,
+               TPA_VAR = tpaVar,
+               BAA_VAR = baaVar,
                TPA_PERC = TREE_TOTAL / (TREE_TOTAL_full) * 100,
                BAA_PERC = BA_TOTAL / (BA_TOTAL_full) * 100,
                tpVar = (1/TREE_TOTAL_full^2) * (treeVar + (TPA_PERC^2 * tTVar) - 2 * TPA_PERC * cvTT),
                bpVar = (1/BA_TOTAL_full^2) * (baVar + (BAA_PERC^2 * bTVar) - (2 * BAA_PERC * cvBT)),
                TPA_PERC_SE = sqrt(tpVar) / TPA_PERC * 100,
-               BAA_PERC_SE = sqrt(bpVar) / BAA_PERC * 100)
+               BAA_PERC_SE = sqrt(bpVar) / BAA_PERC * 100,
+               TPA_PERC_VAR = tpVar,
+               BAA_PERC_VAR = bpVar)
 
 
     })
 
 
     if (totals) {
-      tOut <- tTotal %>%
-        select(grpBy, TPA, BAA, TPA_PERC, BAA_PERC, TREE_TOTAL, BA_TOTAL, AREA_TOTAL, TPA_SE, BAA_SE,
-               TPA_PERC_SE, BAA_PERC_SE, TREE_SE, BA_SE, AREA_TOTAL_SE, nPlots_TREE, nPlots_AREA)
+      if (variance){
+        tOut <- tTotal %>%
+          select(grpBy, TPA, BAA, TPA_PERC, BAA_PERC, TREE_TOTAL, BA_TOTAL, AREA_TOTAL, TPA_VAR, BAA_VAR,
+                 TPA_PERC_VAR, BAA_PERC_VAR, TREE_VAR, BA_VAR, AREA_TOTAL_VAR, nPlots_TREE, nPlots_AREA, N)
+      } else {
+        tOut <- tTotal %>%
+          select(grpBy, TPA, BAA, TPA_PERC, BAA_PERC, TREE_TOTAL, BA_TOTAL, AREA_TOTAL, TPA_SE, BAA_SE,
+                 TPA_PERC_SE, BAA_PERC_SE, TREE_SE, BA_SE, AREA_TOTAL_SE, nPlots_TREE, nPlots_AREA)
+      }
+
     } else {
-      tOut <- tTotal %>%
-        select(grpBy, TPA, BAA, TPA_PERC, BAA_PERC,  TPA_SE, BAA_SE,
-               TPA_PERC_SE, BAA_PERC_SE, nPlots_TREE, nPlots_AREA)
+      if (variance) {
+        tOut <- tTotal %>%
+          select(grpBy, TPA, BAA, TPA_PERC, BAA_PERC,  TPA_VAR, BAA_VAR,
+                 TPA_PERC_VAR, BAA_PERC_VAR, nPlots_TREE, nPlots_AREA, N)
+      } else {
+        tOut <- tTotal %>%
+          select(grpBy, TPA, BAA, TPA_PERC, BAA_PERC,  TPA_SE, BAA_SE,
+                 TPA_PERC_SE, BAA_PERC_SE, nPlots_TREE, nPlots_AREA)
+      }
+
     }
 
     # Snag the names
